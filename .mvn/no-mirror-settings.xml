@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+    <!-- Project-local settings file that disables mirrors so developers can run against Maven Central
+         Usage: pass this file with -s or place it under .mvn/ and call mvn with -s .mvn/no-mirror-settings.xml -->
+    <mirrors/>
+</settings>

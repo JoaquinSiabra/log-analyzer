@@ -1,0 +1,8 @@
+c:\Users\Joaqu¡nAntonioSiabra\Documents\GitHub\log-analyzer\src\main\java\org\logargos\cli\LogAnalyzerApplication.java
+c:\Users\Joaqu¡nAntonioSiabra\Documents\GitHub\log-analyzer\src\main\java\org\logargos\filter\IgnoredErrorFilter.java
+c:\Users\Joaqu¡nAntonioSiabra\Documents\GitHub\log-analyzer\src\main\java\org\logargos\model\ErrorSummary.java
+c:\Users\Joaqu¡nAntonioSiabra\Documents\GitHub\log-analyzer\src\main\java\org\logargos\model\LogError.java
+c:\Users\Joaqu¡nAntonioSiabra\Documents\GitHub\log-analyzer\src\main\java\org\logargos\parser\LogParser.java
+c:\Users\Joaqu¡nAntonioSiabra\Documents\GitHub\log-analyzer\src\main\java\org\logargos\rules\ErrorClassifier.java
+c:\Users\Joaqu¡nAntonioSiabra\Documents\GitHub\log-analyzer\src\main\java\org\logargos\rules\ErrorSummarizer.java
+src\test\java\org\logargos\parser\ManualLogParserRun.java  

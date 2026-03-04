@@ -39,6 +39,14 @@ public class LogParser {
                     break;
                 }
 
+                String trimmedLine = line.trim();
+                // Skip lines that are clearly stack-trace continuations so they don't get
+                // treated as separate error headers (e.g. indented lines, 'at ...', 'Caused by: ...').
+                if (line.matches("^\\s+.*") || trimmedLine.toLowerCase().startsWith("caused by:") || trimmedLine.startsWith("at ")) {
+                    // ignore stray stack trace lines that may appear without a leading header
+                    continue;
+                }
+
                 if (!classifier.isErrorLine(line)) {
                     continue;
                 }
@@ -53,7 +61,9 @@ public class LogParser {
                         break;
                     }
 
-                    if (nextLine.matches("^\\s+.*")) {
+                    String trimmed = nextLine.trim();
+                    // Consider indented lines, 'Caused by:' lines, and 'at ' lines as part of the stack trace
+                    if (nextLine.matches("^\\s+.*") || trimmed.toLowerCase().startsWith("caused by:") || trimmed.startsWith("at ")) {
                         stackTraceLines.add(nextLine);
                     } else {
                         pendingLine = nextLine;

@@ -12,7 +12,13 @@ public class ErrorClassifier {
     private static final Pattern EXCEPTION_PATTERN = Pattern.compile("\\b([A-Za-z_$][A-Za-z\\d_$]*(?:Exception|Error))\\b");
 
     public boolean isErrorLine(String line) {
-        return line != null && ERROR_LINE_PATTERN.matcher(line).matches();
+        if (line == null) return false;
+        String trimmed = line.trim();
+        // Avoid matching stack-trace continuation lines as errors
+        if (line.matches("^\\s+.*") || trimmed.toLowerCase().startsWith("caused by:") || trimmed.startsWith("at ")) {
+            return false;
+        }
+        return ERROR_LINE_PATTERN.matcher(line).matches();
     }
 
     public String extractExceptionType(String line) {

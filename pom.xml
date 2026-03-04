@@ -38,7 +38,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.13.0</version>
+                <version>3.8.1</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -52,11 +52,11 @@
                     </archive>
                 </configuration>
             </plugin>
-            <!-- Ensure Surefire runs JUnit 5 tests -->
+            <!-- Use a stable Surefire version compatible with older Maven installations -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.0.0-M8</version>
+                <version>2.22.2</version>
                 <configuration>
                     <useModulePath>false</useModulePath>
                 </configuration>
