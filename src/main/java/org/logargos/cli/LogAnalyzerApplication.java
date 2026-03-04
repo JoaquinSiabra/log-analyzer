@@ -8,25 +8,31 @@ import org.logargos.rules.ErrorClassifier;
 import org.logargos.rules.ErrorSummarizer;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Properties;
+
 
 /**
  * CLI entry point for the log analyzer.
  */
 public final class LogAnalyzerApplication {
     private static final Path DEFAULT_IGNORE_CONFIG = Path.of("config", "ignored-errors.txt");
+    private static final String PROPERTIES_RESOURCE = "log-analyzer.properties";
+    private static final String DEFAULT_LOG_PATH_PROPERTY = "default.log.path";
+
 
     private LogAnalyzerApplication() {
     }
 
     public static void main(String[] args) {
-        if (args.length != 1) {
-            System.err.println("Usage: java -jar logargos.jar <log-file>");
+        if (args.length > 1) {
+            System.err.println("Usage: java -jar logargos.jar [log-file]");
             System.exit(1);
         }
 
-        Path logPath = Path.of(args[0]);
+        Path logPath = args.length == 1 ? Path.of(args[0]) : resolveDefaultLogPath();
 
         try {
             IgnoredErrorFilter filter = IgnoredErrorFilter.fromFile(DEFAULT_IGNORE_CONFIG);
@@ -43,6 +49,20 @@ public final class LogAnalyzerApplication {
             System.err.printf("Failed to analyze log file '%s': %s%n", logPath, ex.getMessage());
             System.exit(2);
         }
+    }
+
+    private static Path resolveDefaultLogPath() {
+        Properties properties = new Properties();
+        try (InputStream input = LogAnalyzerApplication.class.getClassLoader().getResourceAsStream(PROPERTIES_RESOURCE)) {
+            if (input != null) {
+                properties.load(input);
+            }
+        } catch (IOException ignored) {
+            // Fallback handled below.
+        }
+
+        String defaultPath = properties.getProperty(DEFAULT_LOG_PATH_PROPERTY, "C:\\comun\\logs");
+        return Path.of(defaultPath);
     }
 
     private static void printSummary(ErrorSummary summary) {
