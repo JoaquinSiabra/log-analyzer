@@ -1,0 +1,3 @@
+Broken pipe
+Connection reset
+ClientAbortException
