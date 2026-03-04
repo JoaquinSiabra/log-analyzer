@@ -1,5 +1,6 @@
 package org.logargos.rules;
 
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -23,6 +24,41 @@ public class ErrorClassifier {
         if (matcher.find()) {
             return matcher.group(1);
         }
+        return "UnknownError";
+    }
+
+    /**
+     * Search a list of lines (for example the stacked lines after an error header)
+     * for a recognisable exception type. This looks for explicit "Caused by:" lines
+     * first, then falls back to scanning any line for a token that matches the
+     * EXCEPTION_PATTERN. Returns "UnknownError" when none found.
+     */
+    public String findExceptionInLines(List<String> lines) {
+        if (lines == null || lines.isEmpty()) {
+            return "UnknownError";
+        }
+
+        // First look for typical 'Caused by:' lines which often contain the full type
+        for (String l : lines) {
+            if (l == null) continue;
+            String lower = l.toLowerCase();
+            if (lower.contains("caused by:")) {
+                Matcher m = EXCEPTION_PATTERN.matcher(l);
+                if (m.find()) {
+                    return m.group(1);
+                }
+            }
+        }
+
+        // Fallback: scan any line for an exception-like token
+        for (String l : lines) {
+            if (l == null) continue;
+            Matcher m = EXCEPTION_PATTERN.matcher(l);
+            if (m.find()) {
+                return m.group(1);
+            }
+        }
+
         return "UnknownError";
     }
 }

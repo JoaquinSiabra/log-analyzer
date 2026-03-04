@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.stream.Stream;
@@ -92,8 +93,8 @@ public final class LogAnalyzerApplication {
 
     private static void printSummary(ErrorSummary summary) {
         System.out.printf("Errors detected: %d%n%n", summary.getTotalErrors());
-        summary.getOccurrencesByType().forEach((type, count) ->
-                System.out.printf("%s -> %d%n", type, count)
-        );
+        summary.getOccurrencesByType().entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue(Comparator.reverseOrder()))
+                .forEach(e -> System.out.printf("%s -> %d%n", e.getKey(), e.getValue()));
     }
 }

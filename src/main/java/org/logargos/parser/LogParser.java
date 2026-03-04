@@ -61,6 +61,14 @@ public class LogParser {
                     }
                 }
 
+                // If exception type wasn't found on the header line, try to find it in the stack trace
+                if ("UnknownError".equals(exceptionType)) {
+                    String found = classifier.findExceptionInLines(stackTraceLines);
+                    if (!"UnknownError".equals(found)) {
+                        exceptionType = found;
+                    }
+                }
+
                 errors.add(new LogError(timestamp, exceptionType, line, stackTraceLines));
             }
         }
