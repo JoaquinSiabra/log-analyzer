@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Properties;
 
+
 /**
  * CLI entry point for the log analyzer.
  */
@@ -20,6 +21,7 @@ public final class LogAnalyzerApplication {
     private static final Path DEFAULT_IGNORE_CONFIG = Path.of("config", "ignored-errors.txt");
     private static final String PROPERTIES_RESOURCE = "log-analyzer.properties";
     private static final String DEFAULT_LOG_PATH_PROPERTY = "default.log.path";
+
 
     private LogAnalyzerApplication() {
     }
