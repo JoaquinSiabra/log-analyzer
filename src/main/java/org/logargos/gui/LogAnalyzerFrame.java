@@ -177,6 +177,7 @@ public final class LogAnalyzerFrame extends JFrame {
         // Hook scroll autoload after components exist
         installAutoScrollLoading();
         installOutputContextMenu();
+        installSearchFieldContextMenu();
     }
 
     @Override
@@ -1059,6 +1060,73 @@ public final class LogAnalyzerFrame extends JFrame {
                 copySelection.setEnabled(output.getSelectedText() != null && !output.getSelectedText().isBlank());
                 copyCurrentLine.setEnabled(getLineAtCaret() != null && !getLineAtCaret().isBlank());
                 copyAll.setEnabled(output.getDocument().getLength() > 0);
+
+                menu.show(e.getComponent(), e.getX(), e.getY());
+            }
+        });
+    }
+
+    private void installSearchFieldContextMenu() {
+        JPopupMenu menu = new JPopupMenu();
+
+        JMenuItem cut = new JMenuItem("Cortar");
+        cut.addActionListener(e -> searchField.cut());
+
+        JMenuItem copy = new JMenuItem("Copiar");
+        copy.addActionListener(e -> searchField.copy());
+
+        JMenuItem paste = new JMenuItem("Pegar");
+        paste.addActionListener(e -> searchField.paste());
+
+        JMenuItem selectAll = new JMenuItem("Seleccionar todo");
+        selectAll.addActionListener(e -> searchField.selectAll());
+
+        menu.add(cut);
+        menu.add(copy);
+        menu.add(paste);
+        menu.addSeparator();
+        menu.add(selectAll);
+
+        searchField.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                maybeShow(e);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                maybeShow(e);
+            }
+
+            private void maybeShow(MouseEvent e) {
+                if (!e.isPopupTrigger()) {
+                    return;
+                }
+
+                // Set caret where user right-clicked (nice UX for paste).
+                try {
+                    int pos = searchField.viewToModel2D(e.getPoint());
+                    if (pos >= 0) {
+                        searchField.setCaretPosition(pos);
+                    }
+                } catch (Exception ignored) {
+                }
+
+                String sel = searchField.getSelectedText();
+                boolean hasSelection = sel != null && !sel.isBlank();
+
+                cut.setEnabled(hasSelection && searchField.isEditable() && searchField.isEnabled());
+                copy.setEnabled(hasSelection);
+
+                boolean canPaste = searchField.isEditable() && searchField.isEnabled();
+                try {
+                    var cb = Toolkit.getDefaultToolkit().getSystemClipboard();
+                    canPaste = canPaste && cb.isDataFlavorAvailable(java.awt.datatransfer.DataFlavor.stringFlavor);
+                } catch (Exception ignored) {
+                }
+                paste.setEnabled(canPaste);
+
+                selectAll.setEnabled(searchField.getText() != null && !searchField.getText().isEmpty());
 
                 menu.show(e.getComponent(), e.getX(), e.getY());
             }
