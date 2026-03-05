@@ -3,6 +3,8 @@ package org.logargos.gui;
 import org.logargos.app.LogAnalyzerService;
 import org.logargos.filter.ConsoleLineFilter;
 import org.logargos.filter.ConsoleLineFilter.ConsoleType;
+import org.logargos.filter.LogLevelFilter;
+import org.logargos.filter.LogLevelFilter.LogLevel;
 
 import javax.swing.ButtonGroup;
 import javax.swing.BorderFactory;
@@ -24,6 +26,7 @@ import java.io.BufferedReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.EnumSet;
 import java.util.Map;
 import java.util.prefs.Preferences;
 import javax.swing.JRadioButtonMenuItem;
@@ -55,6 +58,7 @@ public final class LogAnalyzerFrame extends JFrame {
     private static final String PREF_ONLY_CONSOLE = "onlyConsole";
     private static final String PREF_SHOW_TRACE = "showTrace";
     private static final String PREF_CONSOLE_TYPE = "consoleType";
+    private static final String PREF_LEVELS = "logLevels";
 
     private final Preferences prefs = Preferences.userNodeForPackage(LogAnalyzerFrame.class);
 
@@ -62,6 +66,15 @@ public final class LogAnalyzerFrame extends JFrame {
     private JRadioButtonMenuItem consoleTypeItem;
     private JRadioButtonMenuItem consoleRestTypeItem;
     private JRadioButtonMenuItem consoleNotifTypeItem;
+
+    private EnumSet<LogLevel> selectedLevels = EnumSet.of(LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO);
+    private LogLevelFilter logLevelFilter = new LogLevelFilter(selectedLevels);
+
+    private JCheckBoxMenuItem levelErrorItem;
+    private JCheckBoxMenuItem levelWarnItem;
+    private JCheckBoxMenuItem levelInfoItem;
+    private JCheckBoxMenuItem levelDebugItem;
+    private JCheckBoxMenuItem levelTraceItem;
 
     public LogAnalyzerFrame() {
         super("LogArgos - Log Analyzer");
@@ -108,6 +121,26 @@ public final class LogAnalyzerFrame extends JFrame {
         JMenu filterMenu = new JMenu("Filtro");
         filterMenu.add(onlyConsoleMenuItem);
         filterMenu.add(showFullTraceMenuItem);
+        filterMenu.addSeparator();
+
+        // Levels section
+        levelErrorItem = new JCheckBoxMenuItem("Nivel: ERROR", true);
+        levelWarnItem = new JCheckBoxMenuItem("Nivel: WARN", true);
+        levelInfoItem = new JCheckBoxMenuItem("Nivel: INFO", true);
+        levelDebugItem = new JCheckBoxMenuItem("Nivel: DEBUG", false);
+        levelTraceItem = new JCheckBoxMenuItem("Nivel: TRACE", false);
+
+        levelErrorItem.addActionListener(e -> onLevelsChanged());
+        levelWarnItem.addActionListener(e -> onLevelsChanged());
+        levelInfoItem.addActionListener(e -> onLevelsChanged());
+        levelDebugItem.addActionListener(e -> onLevelsChanged());
+        levelTraceItem.addActionListener(e -> onLevelsChanged());
+
+        filterMenu.add(levelErrorItem);
+        filterMenu.add(levelWarnItem);
+        filterMenu.add(levelInfoItem);
+        filterMenu.add(levelDebugItem);
+        filterMenu.add(levelTraceItem);
         filterMenu.addSeparator();
 
         ButtonGroup group = new ButtonGroup();
@@ -169,6 +202,18 @@ public final class LogAnalyzerFrame extends JFrame {
         // Normalize persisted value (store canonical token)
         prefs.put(PREF_CONSOLE_TYPE, type.token());
 
+        // Restore levels
+        selectedLevels = deserializeLevels(prefs.get(PREF_LEVELS, ""));
+        logLevelFilter = new LogLevelFilter(selectedLevels);
+
+        if (levelErrorItem != null) {
+            levelErrorItem.setSelected(selectedLevels.contains(LogLevel.ERROR));
+            levelWarnItem.setSelected(selectedLevels.contains(LogLevel.WARN));
+            levelInfoItem.setSelected(selectedLevels.contains(LogLevel.INFO));
+            levelDebugItem.setSelected(selectedLevels.contains(LogLevel.DEBUG));
+            levelTraceItem.setSelected(selectedLevels.contains(LogLevel.TRACE));
+        }
+
         if (lastPathStr != null && !lastPathStr.isBlank()) {
             try {
                 Path p = Path.of(lastPathStr);
@@ -199,6 +244,7 @@ public final class LogAnalyzerFrame extends JFrame {
         prefs.putBoolean(PREF_ONLY_CONSOLE, onlyConsoleMenuItem.isSelected());
         prefs.putBoolean(PREF_SHOW_TRACE, showFullTraceMenuItem.isSelected());
         prefs.put(PREF_CONSOLE_TYPE, selectedConsoleType.token());
+        prefs.put(PREF_LEVELS, serializeLevels(selectedLevels));
 
         // Persist last path and directory for chooser
         if (currentPath != null) {
@@ -317,6 +363,7 @@ public final class LogAnalyzerFrame extends JFrame {
 
             appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
             appendStyledLine("Vista: líneas filtradas por " + selectedConsoleType.token() + (showFullTrace ? " (con traza)" : ""), LogLineStyler.styleForPlainText());
+            appendStyledLine("Niveles: " + serializeLevels(selectedLevels), LogLineStyler.styleForPlainText());
             appendStyledLine("", LogLineStyler.styleForPlainText());
 
             Path fileToRead = service.resolveLogFile(result.analyzedFile()).orElse(result.analyzedFile());
@@ -325,6 +372,11 @@ public final class LogAnalyzerFrame extends JFrame {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (!consoleLineFilter.matches(line)) {
+                        continue;
+                    }
+
+                    // Apply log level selection (if line has a known level token)
+                    if (!selectedLevels.isEmpty() && !logLevelFilter.matches(line)) {
                         continue;
                     }
 
@@ -371,6 +423,49 @@ public final class LogAnalyzerFrame extends JFrame {
         this.consoleLineFilter = new ConsoleLineFilter(type);
         persistPreferences();
         reanalyzeIfPossible();
+    }
+
+    private void onLevelsChanged() {
+        selectedLevels = newSelectedLevelsFromMenu();
+        logLevelFilter = new LogLevelFilter(selectedLevels);
+        persistPreferences();
+        reanalyzeIfPossible();
+    }
+
+    private EnumSet<LogLevel> newSelectedLevelsFromMenu() {
+        EnumSet<LogLevel> levels = EnumSet.noneOf(LogLevel.class);
+        if (levelErrorItem != null && levelErrorItem.isSelected()) levels.add(LogLevel.ERROR);
+        if (levelWarnItem != null && levelWarnItem.isSelected()) levels.add(LogLevel.WARN);
+        if (levelInfoItem != null && levelInfoItem.isSelected()) levels.add(LogLevel.INFO);
+        if (levelDebugItem != null && levelDebugItem.isSelected()) levels.add(LogLevel.DEBUG);
+        if (levelTraceItem != null && levelTraceItem.isSelected()) levels.add(LogLevel.TRACE);
+        return levels;
+    }
+
+    private static String serializeLevels(EnumSet<LogLevel> levels) {
+        if (levels == null || levels.isEmpty()) {
+            return "";
+        }
+        return levels.stream().map(Enum::name).sorted().reduce((a, b) -> a + "," + b).orElse("");
+    }
+
+    private static EnumSet<LogLevel> deserializeLevels(String s) {
+        if (s == null || s.isBlank()) {
+            return EnumSet.of(LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO);
+        }
+        EnumSet<LogLevel> out = EnumSet.noneOf(LogLevel.class);
+        for (String part : s.split(",")) {
+            String p = part.trim();
+            if (p.isEmpty()) continue;
+            try {
+                out.add(LogLevel.valueOf(p));
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+        if (out.isEmpty()) {
+            return EnumSet.of(LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO);
+        }
+        return out;
     }
 
     private static boolean looksLikeNewLogEventLine(String line) {
