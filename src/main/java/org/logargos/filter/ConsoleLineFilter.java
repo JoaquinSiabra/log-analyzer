@@ -38,8 +38,10 @@ public final class ConsoleLineFilter {
             if (token == null || token.isBlank()) {
                 return ANY;
             }
-            String t = token.trim().toLowerCase(Locale.ROOT);
-            return switch (t) {
+            String t = token.trim();
+            // Accept both canonical tokens ("consoleRest") and lowercase keys stored in prefs ("consolerest").
+            String lower = t.toLowerCase(Locale.ROOT);
+            return switch (lower) {
                 case "console" -> CONSOLE;
                 case "consolerest" -> CONSOLE_REST;
                 case "consolenotif" -> CONSOLE_NOTIF;
