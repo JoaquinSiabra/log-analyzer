@@ -15,7 +15,7 @@ import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
-import javax.swing.JTextArea;
+import javax.swing.JTextPane;
 import javax.swing.SwingWorker;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BorderLayout;
@@ -27,6 +27,8 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.prefs.Preferences;
 import javax.swing.JRadioButtonMenuItem;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.StyledDocument;
 
 /**
  * Simple Swing UI: open a log file/directory and optionally filter to console lines.
@@ -42,7 +44,7 @@ public final class LogAnalyzerFrame extends JFrame {
     // Keep a filter instance so it can be reused when rendering
     private ConsoleLineFilter consoleLineFilter = new ConsoleLineFilter(selectedConsoleType);
 
-    private final JTextArea output = new JTextArea();
+    private final JTextPane output = new JTextPane();
     private final JCheckBoxMenuItem onlyConsoleMenuItem = new JCheckBoxMenuItem("Solo líneas console ('- console -')");
     private final JCheckBoxMenuItem showFullTraceMenuItem = new JCheckBoxMenuItem("Mostrar traza completa (stacktrace)");
 
@@ -255,7 +257,8 @@ public final class LogAnalyzerFrame extends JFrame {
 
         boolean onlyConsole = onlyConsoleMenuItem.isSelected();
 
-        output.setText("Analizando: " + path + (onlyConsole ? " (solo console)" : "") + "\n");
+        clearOutput();
+        appendStyledLine("Analizando: " + path + (onlyConsole ? " (solo console)" : ""), LogLineStyler.styleForPlainText());
 
         new SwingWorker<LogAnalyzerService.AnalysisResult, Void>() {
             @Override
@@ -274,10 +277,93 @@ public final class LogAnalyzerFrame extends JFrame {
                             msg,
                             "Error",
                             JOptionPane.ERROR_MESSAGE);
-                    output.append("\nERROR: " + msg + "\n");
+                    appendStyledLine("ERROR: " + msg, LogLineStyler.styleForLevel("ERROR"));
                 }
             }
         }.execute();
+    }
+
+    private void clearOutput() {
+        output.setText("");
+    }
+
+    private void appendStyledLine(String line, javax.swing.text.AttributeSet style) {
+        appendStyled(line, style);
+        appendStyled(System.lineSeparator(), style);
+    }
+
+    private void appendStyledLogLine(String line) {
+        var segs = LogLineStyler.styleLine(line);
+        for (int i = 0; i < segs.size(); i++) {
+            appendStyled(segs.text(i), segs.style(i));
+        }
+        appendStyled(System.lineSeparator(), LogLineStyler.styleForPlainText());
+    }
+
+    private void appendStyled(String text, javax.swing.text.AttributeSet style) {
+        StyledDocument doc = output.getStyledDocument();
+        try {
+            doc.insertString(doc.getLength(), text, style);
+        } catch (BadLocationException e) {
+            // Shouldn't happen; ignore
+        }
+    }
+
+    private void render(LogAnalyzerService.AnalysisResult result) throws Exception {
+        clearOutput();
+
+        if (onlyConsoleMenuItem.isSelected()) {
+            boolean showFullTrace = showFullTraceMenuItem.isSelected();
+
+            appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
+            appendStyledLine("Vista: líneas filtradas por " + selectedConsoleType.token() + (showFullTrace ? " (con traza)" : ""), LogLineStyler.styleForPlainText());
+            appendStyledLine("", LogLineStyler.styleForPlainText());
+
+            Path fileToRead = service.resolveLogFile(result.analyzedFile()).orElse(result.analyzedFile());
+
+            try (BufferedReader reader = Files.newBufferedReader(fileToRead, StandardCharsets.UTF_8)) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!consoleLineFilter.matches(line)) {
+                        continue;
+                    }
+
+                    appendStyledLogLine(line);
+
+                    if (!showFullTrace) {
+                        continue;
+                    }
+
+                    while (true) {
+                        reader.mark(256 * 1024);
+                        String next = reader.readLine();
+                        if (next == null) {
+                            break;
+                        }
+
+                        if (looksLikeNewLogEventLine(next)) {
+                            reader.reset();
+                            break;
+                        }
+
+                        appendStyledLogLine(next);
+                    }
+
+                    appendStyledLine("", LogLineStyler.styleForPlainText());
+                }
+            }
+
+            return;
+        }
+
+        appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
+        appendStyledLine("Errores detectados (tras ignorados): " + result.summary().getTotalErrors(), LogLineStyler.styleForPlainText());
+        appendStyledLine("", LogLineStyler.styleForPlainText());
+
+        result.summary().getOccurrencesByType().entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue(java.util.Comparator.reverseOrder())
+                        .thenComparing(Map.Entry.comparingByKey()))
+                .forEach(e -> appendStyledLine(e.getKey() + " -> " + e.getValue(), LogLineStyler.styleForPlainText()));
     }
 
     private void setConsoleType(ConsoleType type) {
@@ -291,67 +377,6 @@ public final class LogAnalyzerFrame extends JFrame {
         if (line == null) {
             return false;
         }
-        // Same timestamp style handled by LogParser: "2026-03-04T10:32:41.624 ..." or "2026-03-04 10:32:41,624 ..."
-        return line.matches("^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[,.]\\d{3})?.*");
-    }
-
-    private void render(LogAnalyzerService.AnalysisResult result) throws Exception {
-        if (onlyConsoleMenuItem.isSelected()) {
-            boolean showFullTrace = showFullTraceMenuItem.isSelected();
-
-            StringBuilder sb = new StringBuilder();
-            sb.append("Fichero analizado: ").append(result.analyzedFile()).append("\n");
-            sb.append("Vista: líneas filtradas por ").append(selectedConsoleType.token()).append(showFullTrace ? " (con traza)" : "").append("\n\n");
-
-            Path fileToRead = service.resolveLogFile(result.analyzedFile()).orElse(result.analyzedFile());
-
-            try (BufferedReader reader = Files.newBufferedReader(fileToRead, StandardCharsets.UTF_8)) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!consoleLineFilter.matches(line)) {
-                        continue;
-                    }
-
-                    sb.append(line).append("\n");
-
-                    if (!showFullTrace) {
-                        continue;
-                    }
-
-                    // Full trace mode: append lines until the next *log event* starts (timestamp).
-                    // This prevents leaking other channels (console/struts/HotRod) into the current event.
-                    while (true) {
-                        reader.mark(256 * 1024);
-                        String next = reader.readLine();
-                        if (next == null) {
-                            break;
-                        }
-
-                        if (looksLikeNewLogEventLine(next)) {
-                            reader.reset();
-                            break;
-                        }
-
-                        sb.append(next).append("\n");
-                    }
-
-                    sb.append("\n");
-                }
-            }
-
-            output.setText(sb.toString());
-            return;
-        }
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("Fichero analizado: ").append(result.analyzedFile()).append("\n");
-        sb.append("Errores detectados (tras ignorados): ").append(result.summary().getTotalErrors()).append("\n\n");
-
-        result.summary().getOccurrencesByType().entrySet().stream()
-                .sorted(Map.Entry.<String, Long>comparingByValue(java.util.Comparator.reverseOrder())
-                        .thenComparing(Map.Entry.comparingByKey()))
-                .forEach(e -> sb.append(e.getKey()).append(" -> ").append(e.getValue()).append("\n"));
-
-        output.setText(sb.toString());
+        return LogLineStyler.looksLikeTimestampedLogLine(line);
     }
 }
