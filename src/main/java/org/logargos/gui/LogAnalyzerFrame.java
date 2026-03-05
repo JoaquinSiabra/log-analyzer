@@ -8,6 +8,7 @@ import org.logargos.filter.LogLevelFilter.LogLevel;
 
 import javax.swing.ButtonGroup;
 import javax.swing.BorderFactory;
+import javax.swing.JButton;
 import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
@@ -18,6 +19,7 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextPane;
+import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BorderLayout;
@@ -27,11 +29,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.prefs.Preferences;
 import javax.swing.JRadioButtonMenuItem;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.StyledDocument;
+import javax.swing.JToolBar;
 
 /**
  * Simple Swing UI: open a log file/directory and optionally filter to console lines.
@@ -76,6 +81,15 @@ public final class LogAnalyzerFrame extends JFrame {
     private JCheckBoxMenuItem levelDebugItem;
     private JCheckBoxMenuItem levelTraceItem;
 
+    private final RenderLimits limits = RenderLimits.defaults();
+
+    private SwingWorker<Void, String> renderWorker;
+
+    private final JButton stopButton = new JButton("Parar");
+
+    // Debounce timer for rapid filter toggles
+    private javax.swing.Timer debounceTimer;
+
     public LogAnalyzerFrame() {
         super("LogArgos - Log Analyzer");
 
@@ -96,6 +110,12 @@ public final class LogAnalyzerFrame extends JFrame {
             persistPreferences();
             reanalyzeIfPossible();
         });
+
+        stopButton.setEnabled(false);
+        stopButton.addActionListener(e -> cancelCurrentWork());
+
+        debounceTimer = new javax.swing.Timer(250, e -> reanalyzeIfPossibleImmediate());
+        debounceTimer.setRepeats(false);
 
         // Restore last configuration
         restorePreferences();
@@ -174,132 +194,38 @@ public final class LogAnalyzerFrame extends JFrame {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
         panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
+        JToolBar toolbar = new JToolBar();
+        toolbar.setFloatable(false);
+        toolbar.add(stopButton);
+
+        panel.add(toolbar, BorderLayout.NORTH);
         panel.add(new JScrollPane(output), BorderLayout.CENTER);
         return panel;
     }
 
-    private void restorePreferences() {
-        String lastPathStr = prefs.get(PREF_LAST_PATH, null);
-        String lastDirStr = prefs.get(PREF_LAST_DIR, null);
-
-        onlyConsoleMenuItem.setSelected(prefs.getBoolean(PREF_ONLY_CONSOLE, false));
-        showFullTraceMenuItem.setSelected(prefs.getBoolean(PREF_SHOW_TRACE, false));
-
-        ConsoleType type = ConsoleType.fromToken(prefs.get(PREF_CONSOLE_TYPE, "any"));
-        this.selectedConsoleType = type;
-        this.consoleLineFilter = new ConsoleLineFilter(type);
-
-        // Update radio buttons to reflect restored type
-        if (anyTypeItem != null) {
-            switch (type) {
-                case CONSOLE -> consoleTypeItem.setSelected(true);
-                case CONSOLE_REST -> consoleRestTypeItem.setSelected(true);
-                case CONSOLE_NOTIF -> consoleNotifTypeItem.setSelected(true);
-                case ANY -> anyTypeItem.setSelected(true);
-            }
+    private void cancelCurrentWork() {
+        if (renderWorker != null && !renderWorker.isDone()) {
+            renderWorker.cancel(true);
         }
-
-        // Normalize persisted value (store canonical token)
-        prefs.put(PREF_CONSOLE_TYPE, type.token());
-
-        // Restore levels
-        selectedLevels = deserializeLevels(prefs.get(PREF_LEVELS, ""));
-        logLevelFilter = new LogLevelFilter(selectedLevels);
-
-        if (levelErrorItem != null) {
-            levelErrorItem.setSelected(selectedLevels.contains(LogLevel.ERROR));
-            levelWarnItem.setSelected(selectedLevels.contains(LogLevel.WARN));
-            levelInfoItem.setSelected(selectedLevels.contains(LogLevel.INFO));
-            levelDebugItem.setSelected(selectedLevels.contains(LogLevel.DEBUG));
-            levelTraceItem.setSelected(selectedLevels.contains(LogLevel.TRACE));
-        }
-
-        if (lastPathStr != null && !lastPathStr.isBlank()) {
-            try {
-                Path p = Path.of(lastPathStr);
-                this.currentPath = p;
-                // Don't auto-analyze if path doesn't exist; UI will stay idle.
-                if (Files.exists(p)) {
-                    analyze(p);
-                }
-            } catch (Exception ignored) {
-                // ignore invalid stored path
-            }
-        }
-
-        // Seed file chooser directory if current path isn't available
-        if (this.currentPath == null && lastDirStr != null && !lastDirStr.isBlank()) {
-            try {
-                Path d = Path.of(lastDirStr);
-                if (Files.exists(d)) {
-                    this.currentPath = d;
-                }
-            } catch (Exception ignored) {
-            }
-        }
-    }
-
-    private void persistPreferences() {
-        // Persist filter state
-        prefs.putBoolean(PREF_ONLY_CONSOLE, onlyConsoleMenuItem.isSelected());
-        prefs.putBoolean(PREF_SHOW_TRACE, showFullTraceMenuItem.isSelected());
-        prefs.put(PREF_CONSOLE_TYPE, selectedConsoleType.token());
-        prefs.put(PREF_LEVELS, serializeLevels(selectedLevels));
-
-        // Persist last path and directory for chooser
-        if (currentPath != null) {
-            prefs.put(PREF_LAST_PATH, currentPath.toString());
-            Path dir = currentPath;
-            try {
-                if (Files.isRegularFile(dir)) {
-                    dir = dir.getParent();
-                }
-            } catch (Exception ignored) {
-            }
-            if (dir != null) {
-                prefs.put(PREF_LAST_DIR, dir.toString());
-            }
-        }
-    }
-
-    private void chooseAndAnalyze(boolean directory) {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle(directory ? "Selecciona un directorio de logs" : "Selecciona un archivo de log");
-        chooser.setFileSelectionMode(directory ? JFileChooser.DIRECTORIES_ONLY : JFileChooser.FILES_ONLY);
-
-        String lastDirStr = prefs.get(PREF_LAST_DIR, null);
-        if (lastDirStr != null && !lastDirStr.isBlank()) {
-            try {
-                Path lastDir = Path.of(lastDirStr);
-                if (Files.exists(lastDir)) {
-                    chooser.setCurrentDirectory(lastDir.toFile());
-                }
-            } catch (Exception ignored) {
-            }
-        }
-
-        if (!directory) {
-            chooser.setFileFilter(new FileNameExtensionFilter("Logs (*.log, *.txt)", "log", "txt"));
-        }
-
-        int result = chooser.showOpenDialog(this);
-        if (result != JFileChooser.APPROVE_OPTION) {
-            return;
-        }
-
-        Path selected = chooser.getSelectedFile().toPath();
-        analyze(selected);
     }
 
     private void reanalyzeIfPossible() {
+        if (currentPath == null) {
+            return;
+        }
+        // Debounce to avoid repeated heavy reads when user clicks several filters quickly
+        debounceTimer.restart();
+    }
+
+    private void reanalyzeIfPossibleImmediate() {
         if (currentPath != null) {
             analyze(currentPath);
         }
     }
 
     private void analyze(Path path) {
-        this.currentPath = path;
-        persistPreferences();
+        cancelCurrentWork();
+        stopButton.setEnabled(true);
 
         boolean onlyConsole = onlyConsoleMenuItem.isSelected();
 
@@ -364,50 +290,98 @@ public final class LogAnalyzerFrame extends JFrame {
             appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
             appendStyledLine("Vista: líneas filtradas por " + selectedConsoleType.token() + (showFullTrace ? " (con traza)" : ""), LogLineStyler.styleForPlainText());
             appendStyledLine("Niveles: " + serializeLevels(selectedLevels), LogLineStyler.styleForPlainText());
+            appendStyledLine("(Mostrando hasta " + limits.maxLines() + " líneas / " + limits.maxCharacters() + " caracteres)", LogLineStyler.styleForPlainText());
             appendStyledLine("", LogLineStyler.styleForPlainText());
 
             Path fileToRead = service.resolveLogFile(result.analyzedFile()).orElse(result.analyzedFile());
 
-            try (BufferedReader reader = Files.newBufferedReader(fileToRead, StandardCharsets.UTF_8)) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (!consoleLineFilter.matches(line)) {
-                        continue;
-                    }
+            renderWorker = new SwingWorker<>() {
+                private int linesRendered = 0;
+                private int charsRendered = 0;
 
-                    // Apply log level selection (if line has a known level token)
-                    if (!selectedLevels.isEmpty() && !logLevelFilter.matches(line)) {
-                        continue;
-                    }
+                @Override
+                protected Void doInBackground() throws Exception {
+                    try (BufferedReader reader = Files.newBufferedReader(fileToRead, StandardCharsets.UTF_8)) {
+                        String line;
+                        while (!isCancelled() && (line = reader.readLine()) != null) {
+                            if (!consoleLineFilter.matches(line)) {
+                                continue;
+                            }
+                            if (!selectedLevels.isEmpty() && !logLevelFilter.matches(line)) {
+                                continue;
+                            }
 
-                    appendStyledLogLine(line);
+                            publish(line);
+                            linesRendered++;
+                            charsRendered += line.length() + 1;
 
-                    if (!showFullTrace) {
-                        continue;
-                    }
+                            if (linesRendered >= limits.maxLines() || charsRendered >= limits.maxCharacters()) {
+                                publish("... [LÍMITE ALCANZADO] ...");
+                                break;
+                            }
 
-                    while (true) {
-                        reader.mark(256 * 1024);
-                        String next = reader.readLine();
-                        if (next == null) {
-                            break;
+                            if (!showFullTrace) {
+                                continue;
+                            }
+
+                            while (!isCancelled()) {
+                                reader.mark(256 * 1024);
+                                String next = reader.readLine();
+                                if (next == null) {
+                                    break;
+                                }
+                                if (looksLikeNewLogEventLine(next)) {
+                                    reader.reset();
+                                    break;
+                                }
+
+                                publish(next);
+                                linesRendered++;
+                                charsRendered += next.length() + 1;
+                                if (linesRendered >= limits.maxLines() || charsRendered >= limits.maxCharacters()) {
+                                    publish("... [LÍMITE ALCANZADO] ...");
+                                    return null;
+                                }
+                            }
+
+                            publish("");
+                            linesRendered++;
+                            charsRendered += 1;
+                            if (linesRendered >= limits.maxLines() || charsRendered >= limits.maxCharacters()) {
+                                publish("... [LÍMITE ALCANZADO] ...");
+                                break;
+                            }
                         }
-
-                        if (looksLikeNewLogEventLine(next)) {
-                            reader.reset();
-                            break;
-                        }
-
-                        appendStyledLogLine(next);
                     }
-
-                    appendStyledLine("", LogLineStyler.styleForPlainText());
+                    return null;
                 }
-            }
 
+                @Override
+                protected void process(List<String> chunks) {
+                    for (String l : chunks) {
+                        appendStyledLogLine(l);
+                    }
+                }
+
+                @Override
+                protected void done() {
+                    stopButton.setEnabled(false);
+                    try {
+                        get();
+                    } catch (CancellationException ignored) {
+                        appendStyledLine("[CANCELADO]", LogLineStyler.styleForPlainText());
+                    } catch (Exception ex) {
+                        String msg = ex.getCause() != null ? ex.getCause().getMessage() : ex.getMessage();
+                        appendStyledLine("ERROR renderizando: " + msg, LogLineStyler.styleForLevel("ERROR"));
+                    }
+                }
+            };
+
+            renderWorker.execute();
             return;
         }
 
+        // Summary rendering is lightweight
         appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
         appendStyledLine("Errores detectados (tras ignorados): " + result.summary().getTotalErrors(), LogLineStyler.styleForPlainText());
         appendStyledLine("", LogLineStyler.styleForPlainText());
@@ -416,6 +390,8 @@ public final class LogAnalyzerFrame extends JFrame {
                 .sorted(Map.Entry.<String, Long>comparingByValue(java.util.Comparator.reverseOrder())
                         .thenComparing(Map.Entry.comparingByKey()))
                 .forEach(e -> appendStyledLine(e.getKey() + " -> " + e.getValue(), LogLineStyler.styleForPlainText()));
+
+        stopButton.setEnabled(false);
     }
 
     private void setConsoleType(ConsoleType type) {
@@ -473,5 +449,83 @@ public final class LogAnalyzerFrame extends JFrame {
             return false;
         }
         return LogLineStyler.looksLikeTimestampedLogLine(line);
+    }
+
+    private void persistPreferences() {
+        // Persist filter state
+        prefs.putBoolean(PREF_ONLY_CONSOLE, onlyConsoleMenuItem.isSelected());
+        prefs.putBoolean(PREF_SHOW_TRACE, showFullTraceMenuItem.isSelected());
+        prefs.put(PREF_CONSOLE_TYPE, selectedConsoleType.token());
+        prefs.put(PREF_LEVELS, serializeLevels(selectedLevels));
+
+        if (currentPath != null) {
+            prefs.put(PREF_LAST_PATH, currentPath.toString());
+            Path dir = currentPath;
+            try {
+                if (Files.isRegularFile(dir)) {
+                    dir = dir.getParent();
+                }
+            } catch (Exception ignored) {
+            }
+            if (dir != null) {
+                prefs.put(PREF_LAST_DIR, dir.toString());
+            }
+        }
+    }
+
+    private void restorePreferences() {
+        String lastPathStr = prefs.get(PREF_LAST_PATH, null);
+
+        onlyConsoleMenuItem.setSelected(prefs.getBoolean(PREF_ONLY_CONSOLE, false));
+        showFullTraceMenuItem.setSelected(prefs.getBoolean(PREF_SHOW_TRACE, false));
+
+        selectedConsoleType = ConsoleType.fromToken(prefs.get(PREF_CONSOLE_TYPE, "any"));
+        selectedLevels = deserializeLevels(prefs.get(PREF_LEVELS, ""));
+
+        consoleLineFilter = new ConsoleLineFilter(selectedConsoleType);
+        logLevelFilter = new LogLevelFilter(selectedLevels);
+
+        // Restore menu states if menus already built
+        if (levelErrorItem != null) {
+            levelErrorItem.setSelected(selectedLevels.contains(LogLevel.ERROR));
+            levelWarnItem.setSelected(selectedLevels.contains(LogLevel.WARN));
+            levelInfoItem.setSelected(selectedLevels.contains(LogLevel.INFO));
+            levelDebugItem.setSelected(selectedLevels.contains(LogLevel.DEBUG));
+            levelTraceItem.setSelected(selectedLevels.contains(LogLevel.TRACE));
+        }
+
+        if (anyTypeItem != null) {
+            switch (selectedConsoleType) {
+                case CONSOLE -> consoleTypeItem.setSelected(true);
+                case CONSOLE_REST -> consoleRestTypeItem.setSelected(true);
+                case CONSOLE_NOTIF -> consoleNotifTypeItem.setSelected(true);
+                case ANY -> anyTypeItem.setSelected(true);
+            }
+        }
+
+        if (lastPathStr != null && !lastPathStr.isBlank()) {
+            try {
+                currentPath = Path.of(lastPathStr);
+                if (Files.exists(currentPath)) {
+                    analyze(currentPath);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void chooseAndAnalyze(boolean directory) {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle(directory ? "Abrir directorio" : "Abrir archivo");
+        chooser.setFileSelectionMode(directory ? JFileChooser.DIRECTORIES_ONLY : JFileChooser.FILES_ONLY);
+        if (!directory) {
+            chooser.setAcceptAllFileFilterUsed(false);
+            chooser.addChoosableFileFilter(new FileNameExtensionFilter("Archivos de log (*.log, *.txt)", "log", "txt"));
+        }
+
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            currentPath = chooser.getSelectedFile().toPath();
+            analyze(currentPath);
+        }
     }
 }
