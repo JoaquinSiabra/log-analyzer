@@ -46,6 +46,11 @@ import java.awt.event.AdjustmentEvent;
 import java.awt.event.AdjustmentListener;
 import java.awt.event.MouseWheelEvent;
 import java.awt.event.MouseWheelListener;
+import javax.swing.JPopupMenu;
+import java.awt.Toolkit;
+import java.awt.datatransfer.StringSelection;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 
 /**
  * Simple Swing UI: open a log file/directory and optionally filter to console lines.
@@ -171,6 +176,7 @@ public final class LogAnalyzerFrame extends JFrame {
 
         // Hook scroll autoload after components exist
         installAutoScrollLoading();
+        installOutputContextMenu();
     }
 
     @Override
@@ -996,5 +1002,101 @@ public final class LogAnalyzerFrame extends JFrame {
                 }
             }
         }.execute();
+    }
+
+    private void installOutputContextMenu() {
+        JPopupMenu menu = new JPopupMenu();
+
+        JMenuItem copySelection = new JMenuItem("Copiar selección");
+        copySelection.addActionListener(e -> {
+            String sel = output.getSelectedText();
+            if (sel != null && !sel.isBlank()) {
+                copyToClipboard(sel);
+            }
+        });
+
+        JMenuItem copyCurrentLine = new JMenuItem("Copiar línea actual");
+        copyCurrentLine.addActionListener(e -> {
+            String line = getLineAtCaret();
+            if (line != null && !line.isBlank()) {
+                copyToClipboard(line);
+            }
+        });
+
+        JMenuItem copyAll = new JMenuItem("Copiar todo");
+        copyAll.addActionListener(e -> copyToClipboard(output.getText()));
+
+        menu.add(copySelection);
+        menu.add(copyCurrentLine);
+        menu.addSeparator();
+        menu.add(copyAll);
+
+        output.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                maybeShow(e);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                maybeShow(e);
+            }
+
+            private void maybeShow(MouseEvent e) {
+                if (!e.isPopupTrigger()) {
+                    return;
+                }
+
+                // Place caret where user right-clicked, to make "Copiar línea" intuitive.
+                try {
+                    int pos = output.viewToModel2D(e.getPoint());
+                    if (pos >= 0) {
+                        output.setCaretPosition(pos);
+                    }
+                } catch (Exception ignored) {
+                }
+
+                copySelection.setEnabled(output.getSelectedText() != null && !output.getSelectedText().isBlank());
+                copyCurrentLine.setEnabled(getLineAtCaret() != null && !getLineAtCaret().isBlank());
+                copyAll.setEnabled(output.getDocument().getLength() > 0);
+
+                menu.show(e.getComponent(), e.getX(), e.getY());
+            }
+        });
+    }
+
+    private String getLineAtCaret() {
+        try {
+            int caret = output.getCaretPosition();
+            String text = output.getDocument().getText(0, output.getDocument().getLength());
+            if (text.isEmpty()) {
+                return null;
+            }
+
+            int start = Math.max(0, caret);
+            start = Math.min(start, text.length());
+
+            int lineStart = text.lastIndexOf('\n', Math.max(0, start - 1));
+            lineStart = (lineStart < 0) ? 0 : (lineStart + 1);
+
+            int lineEnd = text.indexOf('\n', start);
+            lineEnd = (lineEnd < 0) ? text.length() : lineEnd;
+
+            String line = text.substring(lineStart, lineEnd);
+            // Strip possible trailing \r
+            if (line.endsWith("\r")) {
+                line = line.substring(0, line.length() - 1);
+            }
+            return line;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static void copyToClipboard(String s) {
+        if (s == null) {
+            return;
+        }
+        Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(s), null);
     }
 }
