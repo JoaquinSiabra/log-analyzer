@@ -5,6 +5,9 @@ import org.logargos.filter.ConsoleLineFilter;
 import org.logargos.filter.ConsoleLineFilter.ConsoleType;
 import org.logargos.filter.LogLevelFilter;
 import org.logargos.filter.LogLevelFilter.LogLevel;
+import org.logargos.search.LogSearchQuery;
+import org.logargos.search.LogSearchService;
+import org.logargos.search.LogSearchSession;
 
 import javax.swing.ButtonGroup;
 import javax.swing.BorderFactory;
@@ -19,6 +22,7 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextPane;
+import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.filechooser.FileNameExtensionFilter;
@@ -51,6 +55,7 @@ public final class LogAnalyzerFrame extends JFrame {
     private static final Path DEFAULT_IGNORE_CONFIG = Path.of("config", "ignored-errors.txt");
 
     private final LogAnalyzerService service = new LogAnalyzerService();
+    private final LogSearchService searchService = new LogSearchService();
 
     private ConsoleType selectedConsoleType = ConsoleType.ANY;
 
@@ -110,6 +115,33 @@ public final class LogAnalyzerFrame extends JFrame {
 
     private volatile boolean hasMoreDown = true;
 
+    private final JTextField searchField = new JTextField(30);
+    private final JButton searchButton = new JButton("Buscar");
+    private final JButton searchNextButton = new JButton("Siguiente");
+    private final JCheckBoxMenuItem searchCaseSensitiveMenu = new JCheckBoxMenuItem("Buscar: case-sensitive", false);
+    private final JCheckBoxMenuItem searchRegexMenu = new JCheckBoxMenuItem("Buscar: regex", false);
+
+    private long lastSearchStartEventIndex = 0;
+
+    private LogSearchSession searchSession;
+    private String lastSearchText;
+    private boolean lastSearchRegex;
+    private boolean lastSearchCase;
+    private ConsoleType lastSearchConsoleType;
+    private EnumSet<LogLevel> lastSearchLevels;
+    private boolean lastSearchIncludeTrace;
+    private Path lastSearchFile;
+
+    // to highlight matches in current window
+    private String highlightText;
+
+    private volatile boolean searchInProgress = false;
+    private volatile long lastFoundEventIndex = -1;
+
+    // Search targeting
+    private volatile long targetEventIndexToHighlight = -1;
+    private volatile long currentWindowStartAtRender = 0;
+
     public LogAnalyzerFrame() {
         super("LogArgos - Log Analyzer");
 
@@ -139,6 +171,15 @@ public final class LogAnalyzerFrame extends JFrame {
 
         // Hook scroll autoload after components exist
         installAutoScrollLoading();
+    }
+
+    @Override
+    public void dispose() {
+        if (searchSession != null) {
+            try { searchSession.close(); } catch (Exception ignored) {}
+            searchSession = null;
+        }
+        super.dispose();
     }
 
     private JMenuBar buildMenuBar() {
@@ -204,8 +245,13 @@ public final class LogAnalyzerFrame extends JFrame {
         filterMenu.add(consoleRestTypeItem);
         filterMenu.add(consoleNotifTypeItem);
 
+        JMenu searchMenu = new JMenu("Buscar");
+        searchMenu.add(searchCaseSensitiveMenu);
+        searchMenu.add(searchRegexMenu);
+
         menuBar.add(fileMenu);
         menuBar.add(filterMenu);
+        menuBar.add(searchMenu);
 
         return menuBar;
     }
@@ -213,6 +259,21 @@ public final class LogAnalyzerFrame extends JFrame {
     private JPanel buildContent() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
         panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        // Search bar
+        JPanel searchBar = new JPanel(new BorderLayout(8, 8));
+        JPanel left = new JPanel();
+        left.add(new JLabel("Buscar:"));
+        left.add(searchField);
+        left.add(searchButton);
+        left.add(searchNextButton);
+
+        searchBar.add(left, BorderLayout.WEST);
+        panel.add(searchBar, BorderLayout.NORTH);
+
+        searchButton.addActionListener(e -> triggerSearch(false));
+        searchNextButton.addActionListener(e -> triggerSearch(true));
+        searchNextButton.setEnabled(false);
 
         outputScrollPane = new JScrollPane(output);
         panel.add(outputScrollPane, BorderLayout.CENTER);
@@ -355,6 +416,7 @@ public final class LogAnalyzerFrame extends JFrame {
     }
 
     private void analyze(Path path) {
+        // new analysis doesn't invalidate session; search session is reset only when query/filtros/file changes
         boolean onlyConsole = onlyConsoleMenuItem.isSelected();
 
         clearOutput();
@@ -420,6 +482,7 @@ public final class LogAnalyzerFrame extends JFrame {
 
         try {
             clearOutput();
+            output.getHighlighter().removeAllHighlights();
 
             if (onlyConsoleMenuItem.isSelected()) {
                 boolean showFullTrace = showFullTraceMenuItem.isSelected();
@@ -434,12 +497,20 @@ public final class LogAnalyzerFrame extends JFrame {
 
                 long pageStart = paging.startOffset();
                 long pageEndExclusive = paging.startOffset() + paging.pageSize();
-                long previousStartOffset = pageStart;
+                currentWindowStartAtRender = pageStart;
+
+                // If target is not inside this window, disable target highlight for this render.
+                final long targetInWindow = (targetEventIndexToHighlight >= pageStart && targetEventIndexToHighlight < pageEndExclusive)
+                        ? targetEventIndexToHighlight
+                        : -1;
 
                 renderWorker = new SwingWorker<>() {
                     private long matchesSeen = 0;
+                    private long eventsRenderedInWindow = 0;
                     private int pageMatchesRendered = 0;
                     private boolean eofReached = false;
+
+                    private long currentEventIndexBeingProcessed = -1;
 
                     @Override
                     protected Void doInBackground() throws Exception {
@@ -467,6 +538,7 @@ public final class LogAnalyzerFrame extends JFrame {
                                     break;
                                 }
 
+                                publish("__EVENT_START__" + matchesSeen);
                                 publish(line);
                                 pageMatchesRendered++;
 
@@ -474,8 +546,10 @@ public final class LogAnalyzerFrame extends JFrame {
                                     publishTrace(reader);
                                 }
 
+                                publish("__EVENT_END__");
                                 publish("");
                                 matchesSeen++;
+                                eventsRenderedInWindow++;
                             }
 
                             eofReached = endedByEof;
@@ -515,7 +589,56 @@ public final class LogAnalyzerFrame extends JFrame {
                     @Override
                     protected void process(List<String> chunks) {
                         for (String l : chunks) {
+                            if (l.startsWith("__EVENT_START__")) {
+                                try {
+                                    currentEventIndexBeingProcessed = Long.parseLong(l.substring("__EVENT_START__".length()));
+                                } catch (Exception ignored) {
+                                    currentEventIndexBeingProcessed = -1;
+                                }
+                                continue;
+                            }
+                            if (l.equals("__EVENT_END__")) {
+                                currentEventIndexBeingProcessed = -1;
+                                continue;
+                            }
+
                             appendStyledLogLine(l);
+
+                            if (targetInWindow >= 0
+                                    && currentEventIndexBeingProcessed == targetInWindow
+                                    && highlightText != null
+                                    && !highlightText.isBlank()) {
+                                highlightFirstOccurrenceInRecentlyAppendedLine(l, highlightText, searchCaseSensitiveMenu.isSelected());
+                            }
+                        }
+                    }
+
+                    private void highlightFirstOccurrenceInRecentlyAppendedLine(String lineText, String needleText, boolean caseSensitive) {
+                        if (needleText == null || needleText.isBlank()) {
+                            return;
+                        }
+                        try {
+                            int lineLenWithNl = lineText.length() + System.lineSeparator().length();
+                            int docLen = output.getDocument().getLength();
+                            int lineStart = Math.max(0, docLen - lineLenWithNl);
+                            String hay = caseSensitive ? lineText : lineText.toLowerCase(java.util.Locale.ROOT);
+                            String needle = caseSensitive ? needleText : needleText.toLowerCase(java.util.Locale.ROOT);
+                            int idx = hay.indexOf(needle);
+                            if (idx < 0) {
+                                return;
+                            }
+                            int start = lineStart + idx;
+                            int end = start + needle.length();
+
+                            var hl = output.getHighlighter();
+                            var painter = new javax.swing.text.DefaultHighlighter.DefaultHighlightPainter(new java.awt.Color(255, 240, 120));
+                            hl.addHighlight(start, end, painter);
+
+                            var doc = (javax.swing.text.StyledDocument) output.getDocument();
+                            javax.swing.text.SimpleAttributeSet bold = new javax.swing.text.SimpleAttributeSet();
+                            javax.swing.text.StyleConstants.setBold(bold, true);
+                            doc.setCharacterAttributes(start, needle.length(), bold, false);
+                        } catch (Exception ignored) {
                         }
                     }
 
@@ -583,6 +706,35 @@ public final class LogAnalyzerFrame extends JFrame {
                 renderInProgress = false;
                 SwingUtilities.invokeLater(() -> ignoreScrollEvents = false);
             }
+        }
+    }
+
+    private void highlightInOutput(String text, boolean caseSensitive) {
+        try {
+            String full = output.getDocument().getText(0, output.getDocument().getLength());
+            if (full.isEmpty()) {
+                return;
+            }
+            String hay = caseSensitive ? full : full.toLowerCase(java.util.Locale.ROOT);
+            String needle = caseSensitive ? text : text.toLowerCase(java.util.Locale.ROOT);
+
+            int idx = hay.indexOf(needle);
+            if (idx < 0) {
+                return;
+            }
+
+            var hl = output.getHighlighter();
+            var painter = new javax.swing.text.DefaultHighlighter.DefaultHighlightPainter(new java.awt.Color(255, 240, 120));
+            hl.addHighlight(idx, idx + needle.length(), painter);
+
+            // Additionally bold the found substring by applying a character attribute.
+            // We keep it simple: apply bold to that range only.
+            var doc = (javax.swing.text.StyledDocument) output.getDocument();
+            javax.swing.text.SimpleAttributeSet bold = new javax.swing.text.SimpleAttributeSet();
+            javax.swing.text.StyleConstants.setBold(bold, true);
+            doc.setCharacterAttributes(idx, needle.length(), bold, false);
+
+        } catch (Exception ignored) {
         }
     }
 
@@ -725,5 +877,124 @@ public final class LogAnalyzerFrame extends JFrame {
             currentPath = chooser.getSelectedFile().toPath();
             analyze(currentPath);
         }
+    }
+
+    private void triggerSearch(boolean next) {
+        if (searchInProgress) {
+            return;
+        }
+        if (renderInProgress) {
+            return;
+        }
+        if (currentPath == null) {
+            return;
+        }
+        String q = searchField.getText();
+        if (q == null || q.isBlank()) {
+            return;
+        }
+
+        Path fileToRead;
+        try {
+            fileToRead = service.resolveLogFile(currentPath).orElse(currentPath);
+        } catch (Exception ex) {
+            fileToRead = currentPath;
+        }
+
+        boolean includeTrace = showFullTraceMenuItem.isSelected();
+        boolean regex = searchRegexMenu.isSelected();
+        boolean cs = searchCaseSensitiveMenu.isSelected();
+
+        boolean baseNeedsReset = searchSession == null
+                || lastSearchFile == null
+                || !lastSearchFile.equals(fileToRead)
+                || lastSearchText == null
+                || !lastSearchText.equals(q)
+                || lastSearchRegex != regex
+                || lastSearchCase != cs
+                || lastSearchConsoleType != selectedConsoleType
+                || lastSearchIncludeTrace != includeTrace
+                || lastSearchLevels == null
+                || !lastSearchLevels.equals(selectedLevels);
+
+        // "Buscar" always starts from the beginning.
+        boolean needsReset = baseNeedsReset || !next;
+
+        if (needsReset) {
+            if (searchSession != null) {
+                try {
+                    searchSession.close();
+                } catch (Exception ignored) {
+                }
+                searchSession = null;
+            }
+            LogSearchQuery.Mode mode = regex ? LogSearchQuery.Mode.REGEX : LogSearchQuery.Mode.CONTAINS;
+            LogSearchQuery query = new LogSearchQuery(q, mode, cs);
+            var opts = new LogSearchSession.Options(consoleLineFilter, logLevelFilter, includeTrace);
+            searchSession = new LogSearchSession(fileToRead, query, opts);
+
+            lastSearchFile = fileToRead;
+            lastSearchText = q;
+            lastSearchRegex = regex;
+            lastSearchCase = cs;
+            lastSearchConsoleType = selectedConsoleType;
+            lastSearchLevels = EnumSet.copyOf(selectedLevels);
+            lastSearchIncludeTrace = includeTrace;
+        }
+
+        searchInProgress = true;
+        searchButton.setEnabled(false);
+        searchNextButton.setEnabled(false);
+
+        highlightText = q;
+
+        new SwingWorker<java.util.OptionalLong, Void>() {
+            @Override
+            protected java.util.OptionalLong doInBackground() throws Exception {
+                if (searchSession == null) {
+                    return java.util.OptionalLong.empty();
+                }
+                return searchSession.findNextEventIndex();
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    var res = get();
+                    if (res.isPresent()) {
+                        long foundIndex = res.getAsLong();
+                        lastFoundEventIndex = foundIndex;
+                        targetEventIndexToHighlight = foundIndex;
+
+                        long pageSize = paging.pageSize();
+                        long newStart = (foundIndex / pageSize) * pageSize;
+
+                        paging.reset();
+                        while (paging.startOffset() < newStart) {
+                            paging.moveWindowDown();
+                        }
+
+                        pendingScrollDirection = ScrollDirection.NONE;
+                        analyze(currentPath);
+                    } else {
+                        JOptionPane.showMessageDialog(LogAnalyzerFrame.this,
+                                "No se encontró más coincidencias.",
+                                "Buscar",
+                                JOptionPane.INFORMATION_MESSAGE);
+                        searchNextButton.setEnabled(true);
+                    }
+                } catch (Exception ex) {
+                    String msg = ex.getCause() != null ? ex.getCause().getMessage() : ex.getMessage();
+                    JOptionPane.showMessageDialog(LogAnalyzerFrame.this,
+                            msg,
+                            "Buscar - Error",
+                            JOptionPane.ERROR_MESSAGE);
+                } finally {
+                    searchInProgress = false;
+                    searchButton.setEnabled(true);
+                    searchNextButton.setEnabled(true);
+                }
+            }
+        }.execute();
     }
 }
