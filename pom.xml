@@ -14,6 +14,13 @@
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.jupiter.version>5.10.0</junit.jupiter.version>
+
+        <!-- GUI entry point (used for packaging) -->
+        <mainClassGui>org.logargos.gui.SwingLogAnalyzerApplication</mainClassGui>
+
+        <!-- App identity for packaging -->
+        <app.name>LogArgos</app.name>
+        <app.vendor>LogArgos</app.vendor>
     </properties>
 
     <dependencies>
@@ -40,6 +47,8 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.8.1</version>
             </plugin>
+
+            <!-- Default JAR manifest kept for CLI; GUI packaging uses a separate JAR classifier -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
@@ -51,7 +60,25 @@
                         </manifest>
                     </archive>
                 </configuration>
+                <executions>
+                    <execution>
+                        <id>gui-jar</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>gui</classifier>
+                            <archive>
+                                <manifest>
+                                    <mainClass>${mainClassGui}</mainClass>
+                                </manifest>
+                            </archive>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
+
             <!-- Use a stable Surefire version compatible with older Maven installations -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -61,6 +88,8 @@
                     <useModulePath>false</useModulePath>
                 </configuration>
             </plugin>
+
+            <!-- NOTE: Windows packaging is provided via scripts in /bin using the JDK's jpackage tool. -->
         </plugins>
     </build>
 </project>

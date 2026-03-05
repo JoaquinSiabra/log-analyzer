@@ -51,3 +51,28 @@ Ver versión de Maven/Java:
 ```cmd
 mvnw.cmd -v
 ```
+
+## Windows: autoejecutable (incluye Java)
+
+Este proyecto puede empaquetarse como una app de Windows que **incluye su propio runtime de Java** (no necesitas Java instalado en el PC destino).
+
+Requisitos en la máquina de build:
+- Windows
+- **JDK** 16+ (recomendado 21) con `jpackage.exe` disponible
+  - O bien configura `JAVA_HOME`, o bien asegúrate de que `jpackage.exe` está en el `PATH`.
+
+Generación:
+```cmd
+cd /d C:\Users\JoaquínAntonioSiabra\Documents\GitHub\log-analyzer
+bin\package-win.cmd
+```
+
+Salida:
+- `target\dist\LogArgos\LogArgos.exe`
+
+Distribución:
+- Puedes comprimir la carpeta `target\dist\LogArgos` y copiarla a cualquier PC con Windows.
+
+Notas:
+- El empaquetado usa `jpackage --type app-image` para evitar dependencias extra (MSI/WiX).
+- Si quieres un instalador MSI en el futuro, se puede añadir como paso opcional.
