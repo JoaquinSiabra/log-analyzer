@@ -1,7 +1,10 @@
 package org.logargos.gui;
 
 import org.logargos.app.LogAnalyzerService;
+import org.logargos.filter.ConsoleLineFilter;
+import org.logargos.filter.ConsoleLineFilter.ConsoleType;
 
+import javax.swing.ButtonGroup;
 import javax.swing.BorderFactory;
 import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JFileChooser;
@@ -17,8 +20,12 @@ import javax.swing.SwingWorker;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
+import java.io.BufferedReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import javax.swing.JRadioButtonMenuItem;
 
 /**
  * Simple Swing UI: open a log file/directory and optionally filter to console lines.
@@ -29,8 +36,14 @@ public final class LogAnalyzerFrame extends JFrame {
 
     private final LogAnalyzerService service = new LogAnalyzerService();
 
+    private ConsoleType selectedConsoleType = ConsoleType.ANY;
+
+    // Keep a filter instance so it can be reused when rendering
+    private ConsoleLineFilter consoleLineFilter = new ConsoleLineFilter(selectedConsoleType);
+
     private final JTextArea output = new JTextArea();
     private final JCheckBoxMenuItem onlyConsoleMenuItem = new JCheckBoxMenuItem("Solo líneas console ('- console -')");
+    private final JCheckBoxMenuItem showFullTraceMenuItem = new JCheckBoxMenuItem("Mostrar traza completa (stacktrace)");
 
     private Path currentPath;
 
@@ -47,6 +60,7 @@ public final class LogAnalyzerFrame extends JFrame {
         output.setFont(output.getFont().deriveFont(12f));
 
         onlyConsoleMenuItem.addActionListener(e -> reanalyzeIfPossible());
+        showFullTraceMenuItem.addActionListener(e -> reanalyzeIfPossible());
     }
 
     private JMenuBar buildMenuBar() {
@@ -68,6 +82,29 @@ public final class LogAnalyzerFrame extends JFrame {
 
         JMenu filterMenu = new JMenu("Filtro");
         filterMenu.add(onlyConsoleMenuItem);
+        filterMenu.add(showFullTraceMenuItem);
+        filterMenu.addSeparator();
+
+        ButtonGroup group = new ButtonGroup();
+        JRadioButtonMenuItem any = new JRadioButtonMenuItem("Tipo: cualquiera (console*)", true);
+        JRadioButtonMenuItem console = new JRadioButtonMenuItem("Tipo: console");
+        JRadioButtonMenuItem consoleRest = new JRadioButtonMenuItem("Tipo: consoleRest");
+        JRadioButtonMenuItem consoleNotif = new JRadioButtonMenuItem("Tipo: consoleNotif");
+
+        group.add(any);
+        group.add(console);
+        group.add(consoleRest);
+        group.add(consoleNotif);
+
+        any.addActionListener(e -> setConsoleType(ConsoleType.ANY));
+        console.addActionListener(e -> setConsoleType(ConsoleType.CONSOLE));
+        consoleRest.addActionListener(e -> setConsoleType(ConsoleType.CONSOLE_REST));
+        consoleNotif.addActionListener(e -> setConsoleType(ConsoleType.CONSOLE_NOTIF));
+
+        filterMenu.add(any);
+        filterMenu.add(console);
+        filterMenu.add(consoleRest);
+        filterMenu.add(consoleNotif);
 
         menuBar.add(fileMenu);
         menuBar.add(filterMenu);
@@ -136,7 +173,68 @@ public final class LogAnalyzerFrame extends JFrame {
         }.execute();
     }
 
-    private void render(LogAnalyzerService.AnalysisResult result) {
+    private void setConsoleType(ConsoleType type) {
+        this.selectedConsoleType = type;
+        this.consoleLineFilter = new ConsoleLineFilter(type);
+        reanalyzeIfPossible();
+    }
+
+    private static boolean looksLikeNewLogEventLine(String line) {
+        if (line == null) {
+            return false;
+        }
+        // Same timestamp style handled by LogParser: "2026-03-04T10:32:41.624 ..." or "2026-03-04 10:32:41,624 ..."
+        return line.matches("^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[,.]\\d{3})?.*");
+    }
+
+    private void render(LogAnalyzerService.AnalysisResult result) throws Exception {
+        if (onlyConsoleMenuItem.isSelected()) {
+            boolean showFullTrace = showFullTraceMenuItem.isSelected();
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("Fichero analizado: ").append(result.analyzedFile()).append("\n");
+            sb.append("Vista: líneas filtradas por ").append(selectedConsoleType.token()).append(showFullTrace ? " (con traza)" : "").append("\n\n");
+
+            Path fileToRead = service.resolveLogFile(result.analyzedFile()).orElse(result.analyzedFile());
+
+            try (BufferedReader reader = Files.newBufferedReader(fileToRead, StandardCharsets.UTF_8)) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (!consoleLineFilter.matches(line)) {
+                        continue;
+                    }
+
+                    sb.append(line).append("\n");
+
+                    if (!showFullTrace) {
+                        continue;
+                    }
+
+                    // Full trace mode: append lines until the next *log event* starts (timestamp).
+                    // This prevents leaking other channels (console/struts/HotRod) into the current event.
+                    while (true) {
+                        reader.mark(256 * 1024);
+                        String next = reader.readLine();
+                        if (next == null) {
+                            break;
+                        }
+
+                        if (looksLikeNewLogEventLine(next)) {
+                            reader.reset();
+                            break;
+                        }
+
+                        sb.append(next).append("\n");
+                    }
+
+                    sb.append("\n");
+                }
+            }
+
+            output.setText(sb.toString());
+            return;
+        }
+
         StringBuilder sb = new StringBuilder();
         sb.append("Fichero analizado: ").append(result.analyzedFile()).append("\n");
         sb.append("Errores detectados (tras ignorados): ").append(result.summary().getTotalErrors()).append("\n\n");
