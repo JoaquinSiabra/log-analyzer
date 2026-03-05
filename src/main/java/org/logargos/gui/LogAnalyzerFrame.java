@@ -37,6 +37,11 @@ import javax.swing.JRadioButtonMenuItem;
 import javax.swing.text.BadLocationException;
 import javax.swing.text.StyledDocument;
 import javax.swing.JToolBar;
+import javax.swing.JLabel;
+import java.awt.event.AdjustmentEvent;
+import java.awt.event.AdjustmentListener;
+import java.awt.event.MouseWheelEvent;
+import java.awt.event.MouseWheelListener;
 
 /**
  * Simple Swing UI: open a log file/directory and optionally filter to console lines.
@@ -85,10 +90,25 @@ public final class LogAnalyzerFrame extends JFrame {
 
     private SwingWorker<Void, String> renderWorker;
 
-    private final JButton stopButton = new JButton("Parar");
-
     // Debounce timer for rapid filter toggles
     private javax.swing.Timer debounceTimer;
+
+    private final PaginationState paging = new PaginationState(2000);
+
+    // scroll-trigger guard
+    private volatile boolean autoLoadInProgress = false;
+
+    private JScrollPane outputScrollPane;
+
+    private volatile boolean renderInProgress = false;
+    private volatile boolean ignoreScrollEvents = false;
+    private long lastAutoLoadAtMs = 0;
+
+    private enum ScrollDirection { NONE, UP, DOWN }
+
+    private volatile ScrollDirection pendingScrollDirection = ScrollDirection.NONE;
+
+    private volatile boolean hasMoreDown = true;
 
     public LogAnalyzerFrame() {
         super("LogArgos - Log Analyzer");
@@ -111,14 +131,14 @@ public final class LogAnalyzerFrame extends JFrame {
             reanalyzeIfPossible();
         });
 
-        stopButton.setEnabled(false);
-        stopButton.addActionListener(e -> cancelCurrentWork());
-
         debounceTimer = new javax.swing.Timer(250, e -> reanalyzeIfPossibleImmediate());
         debounceTimer.setRepeats(false);
 
         // Restore last configuration
         restorePreferences();
+
+        // Hook scroll autoload after components exist
+        installAutoScrollLoading();
     }
 
     private JMenuBar buildMenuBar() {
@@ -194,19 +214,130 @@ public final class LogAnalyzerFrame extends JFrame {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
         panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
-        JToolBar toolbar = new JToolBar();
-        toolbar.setFloatable(false);
-        toolbar.add(stopButton);
-
-        panel.add(toolbar, BorderLayout.NORTH);
-        panel.add(new JScrollPane(output), BorderLayout.CENTER);
+        outputScrollPane = new JScrollPane(output);
+        panel.add(outputScrollPane, BorderLayout.CENTER);
         return panel;
     }
 
-    private void cancelCurrentWork() {
-        if (renderWorker != null && !renderWorker.isDone()) {
-            renderWorker.cancel(true);
+    private void installAutoScrollLoading() {
+        if (outputScrollPane == null) {
+            return;
         }
+
+        // Mouse wheel gives us reliable intent even when scrollbar value doesn't change (e.g., at absolute end).
+        outputScrollPane.addMouseWheelListener(new MouseWheelListener() {
+            @Override
+            public void mouseWheelMoved(MouseWheelEvent e) {
+                if (ignoreScrollEvents || renderInProgress) {
+                    return;
+                }
+                if (!onlyConsoleMenuItem.isSelected() || currentPath == null) {
+                    return;
+                }
+
+                // e.getWheelRotation(): negative -> up, positive -> down
+                int rot = e.getWheelRotation();
+                if (rot < 0) {
+                    // Up
+                    if (paging.startOffset() == 0) {
+                        return;
+                    }
+                    long now = System.currentTimeMillis();
+                    if (now - lastAutoLoadAtMs < 800) {
+                        return;
+                    }
+
+                    var bar = outputScrollPane.getVerticalScrollBar();
+                    if (bar.getValue() <= 40) {
+                        lastAutoLoadAtMs = now;
+                        pendingScrollDirection = ScrollDirection.UP;
+                        paging.moveWindowUp();
+                        analyze(currentPath);
+                    }
+                } else if (rot > 0) {
+                    // Down
+                    if (!hasMoreDown) {
+                        return;
+                    }
+                    long now = System.currentTimeMillis();
+                    if (now - lastAutoLoadAtMs < 800) {
+                        return;
+                    }
+
+                    var bar = outputScrollPane.getVerticalScrollBar();
+                    int value = bar.getValue();
+                    int extent = bar.getModel().getExtent();
+                    int max = bar.getMaximum();
+                    if (value + extent >= max - 40) {
+                        lastAutoLoadAtMs = now;
+                        pendingScrollDirection = ScrollDirection.DOWN;
+                        paging.moveWindowDown();
+                        analyze(currentPath);
+                    }
+                }
+            }
+        });
+
+        outputScrollPane.getVerticalScrollBar().addAdjustmentListener(new AdjustmentListener() {
+            private int lastValue = -1;
+
+            @Override
+            public void adjustmentValueChanged(AdjustmentEvent e) {
+                if (e.getValueIsAdjusting()) {
+                    return;
+                }
+                if (ignoreScrollEvents) {
+                    return;
+                }
+                if (renderInProgress) {
+                    return;
+                }
+                if (!onlyConsoleMenuItem.isSelected()) {
+                    return;
+                }
+                if (currentPath == null) {
+                    return;
+                }
+
+                var bar = outputScrollPane.getVerticalScrollBar();
+                int value = bar.getValue();
+                int extent = bar.getModel().getExtent();
+                int max = bar.getMaximum();
+
+                boolean userScrollingUp = (lastValue >= 0) && value < lastValue;
+                boolean userScrollingDown = (lastValue >= 0) && value > lastValue;
+                lastValue = value;
+
+                long now = System.currentTimeMillis();
+                if (now - lastAutoLoadAtMs < 800) {
+                    return;
+                }
+
+                int topThresholdPx = 30;
+                int bottomThresholdPx = 30;
+
+                boolean nearTop = value <= topThresholdPx;
+                boolean nearBottom = value + extent >= max - bottomThresholdPx;
+
+                if (nearTop && (userScrollingUp || bar.getValue() == 0)) {
+                    if (paging.startOffset() == 0) {
+                        return;
+                    }
+                    lastAutoLoadAtMs = now;
+                    pendingScrollDirection = ScrollDirection.UP;
+                    paging.moveWindowUp();
+                    analyze(currentPath);
+                } else if (nearBottom && userScrollingDown) {
+                    if (!hasMoreDown) {
+                        return;
+                    }
+                    lastAutoLoadAtMs = now;
+                    pendingScrollDirection = ScrollDirection.DOWN;
+                    paging.moveWindowDown();
+                    analyze(currentPath);
+                }
+            }
+        });
     }
 
     private void reanalyzeIfPossible() {
@@ -224,9 +355,6 @@ public final class LogAnalyzerFrame extends JFrame {
     }
 
     private void analyze(Path path) {
-        cancelCurrentWork();
-        stopButton.setEnabled(true);
-
         boolean onlyConsole = onlyConsoleMenuItem.isSelected();
 
         clearOutput();
@@ -250,6 +378,8 @@ public final class LogAnalyzerFrame extends JFrame {
                             "Error",
                             JOptionPane.ERROR_MESSAGE);
                     appendStyledLine("ERROR: " + msg, LogLineStyler.styleForLevel("ERROR"));
+                } finally {
+                    autoLoadInProgress = false;
                 }
             }
         }.execute();
@@ -282,130 +412,198 @@ public final class LogAnalyzerFrame extends JFrame {
     }
 
     private void render(LogAnalyzerService.AnalysisResult result) throws Exception {
-        clearOutput();
+        renderInProgress = true;
+        ignoreScrollEvents = true;
 
-        if (onlyConsoleMenuItem.isSelected()) {
-            boolean showFullTrace = showFullTraceMenuItem.isSelected();
+        // Capture scroll position before we clear (to keep an anchor)
+        int oldScrollValue = outputScrollPane != null ? outputScrollPane.getVerticalScrollBar().getValue() : 0;
 
-            appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
-            appendStyledLine("Vista: líneas filtradas por " + selectedConsoleType.token() + (showFullTrace ? " (con traza)" : ""), LogLineStyler.styleForPlainText());
-            appendStyledLine("Niveles: " + serializeLevels(selectedLevels), LogLineStyler.styleForPlainText());
-            appendStyledLine("(Mostrando hasta " + limits.maxLines() + " líneas / " + limits.maxCharacters() + " caracteres)", LogLineStyler.styleForPlainText());
-            appendStyledLine("", LogLineStyler.styleForPlainText());
+        try {
+            clearOutput();
 
-            Path fileToRead = service.resolveLogFile(result.analyzedFile()).orElse(result.analyzedFile());
+            if (onlyConsoleMenuItem.isSelected()) {
+                boolean showFullTrace = showFullTraceMenuItem.isSelected();
 
-            renderWorker = new SwingWorker<>() {
-                private int linesRendered = 0;
-                private int charsRendered = 0;
+                appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
+                appendStyledLine("Vista: líneas filtradas por " + selectedConsoleType.token() + (showFullTrace ? " (con traza)" : ""), LogLineStyler.styleForPlainText());
+                appendStyledLine("Niveles: " + serializeLevels(selectedLevels), LogLineStyler.styleForPlainText());
+                appendStyledLine("Ventana: offset=" + paging.startOffset() + " tamaño=" + paging.pageSize(), LogLineStyler.styleForPlainText());
+                appendStyledLine("", LogLineStyler.styleForPlainText());
 
-                @Override
-                protected Void doInBackground() throws Exception {
-                    try (BufferedReader reader = Files.newBufferedReader(fileToRead, StandardCharsets.UTF_8)) {
-                        String line;
-                        while (!isCancelled() && (line = reader.readLine()) != null) {
-                            if (!consoleLineFilter.matches(line)) {
-                                continue;
-                            }
-                            if (!selectedLevels.isEmpty() && !logLevelFilter.matches(line)) {
-                                continue;
-                            }
+                Path fileToRead = service.resolveLogFile(result.analyzedFile()).orElse(result.analyzedFile());
 
-                            publish(line);
-                            linesRendered++;
-                            charsRendered += line.length() + 1;
+                long pageStart = paging.startOffset();
+                long pageEndExclusive = paging.startOffset() + paging.pageSize();
+                long previousStartOffset = pageStart;
 
-                            if (linesRendered >= limits.maxLines() || charsRendered >= limits.maxCharacters()) {
-                                publish("... [LÍMITE ALCANZADO] ...");
-                                break;
-                            }
+                renderWorker = new SwingWorker<>() {
+                    private long matchesSeen = 0;
+                    private int pageMatchesRendered = 0;
+                    private boolean eofReached = false;
 
-                            if (!showFullTrace) {
-                                continue;
-                            }
+                    @Override
+                    protected Void doInBackground() throws Exception {
+                        try (BufferedReader reader = Files.newBufferedReader(fileToRead, StandardCharsets.UTF_8)) {
+                            String line;
+                            boolean endedByEof = true;
+                            while (!isCancelled() && (line = reader.readLine()) != null) {
+                                if (!consoleLineFilter.matches(line)) {
+                                    continue;
+                                }
+                                if (!selectedLevels.isEmpty() && !logLevelFilter.matches(line)) {
+                                    continue;
+                                }
 
-                            while (!isCancelled()) {
-                                reader.mark(256 * 1024);
-                                String next = reader.readLine();
-                                if (next == null) {
+                                if (matchesSeen < pageStart) {
+                                    matchesSeen++;
+                                    if (showFullTrace) {
+                                        skipUntilNextEvent(reader);
+                                    }
+                                    continue;
+                                }
+
+                                if (matchesSeen >= pageEndExclusive) {
+                                    endedByEof = false;
                                     break;
                                 }
-                                if (looksLikeNewLogEventLine(next)) {
-                                    reader.reset();
-                                    break;
+
+                                publish(line);
+                                pageMatchesRendered++;
+
+                                if (showFullTrace) {
+                                    publishTrace(reader);
                                 }
 
-                                publish(next);
-                                linesRendered++;
-                                charsRendered += next.length() + 1;
-                                if (linesRendered >= limits.maxLines() || charsRendered >= limits.maxCharacters()) {
-                                    publish("... [LÍMITE ALCANZADO] ...");
-                                    return null;
-                                }
+                                publish("");
+                                matchesSeen++;
                             }
 
-                            publish("");
-                            linesRendered++;
-                            charsRendered += 1;
-                            if (linesRendered >= limits.maxLines() || charsRendered >= limits.maxCharacters()) {
-                                publish("... [LÍMITE ALCANZADO] ...");
-                                break;
+                            eofReached = endedByEof;
+                        }
+                        return null;
+                    }
+
+                    private void skipUntilNextEvent(BufferedReader reader) throws Exception {
+                        while (!isCancelled()) {
+                            reader.mark(256 * 1024);
+                            String next = reader.readLine();
+                            if (next == null) {
+                                return;
+                            }
+                            if (looksLikeNewLogEventLine(next)) {
+                                reader.reset();
+                                return;
                             }
                         }
                     }
-                    return null;
-                }
 
-                @Override
-                protected void process(List<String> chunks) {
-                    for (String l : chunks) {
-                        appendStyledLogLine(l);
+                    private void publishTrace(BufferedReader reader) throws Exception {
+                        while (!isCancelled()) {
+                            reader.mark(256 * 1024);
+                            String next = reader.readLine();
+                            if (next == null) {
+                                return;
+                            }
+                            if (looksLikeNewLogEventLine(next)) {
+                                reader.reset();
+                                return;
+                            }
+                            publish(next);
+                        }
                     }
-                }
 
-                @Override
-                protected void done() {
-                    stopButton.setEnabled(false);
-                    try {
-                        get();
-                    } catch (CancellationException ignored) {
-                        appendStyledLine("[CANCELADO]", LogLineStyler.styleForPlainText());
-                    } catch (Exception ex) {
-                        String msg = ex.getCause() != null ? ex.getCause().getMessage() : ex.getMessage();
-                        appendStyledLine("ERROR renderizando: " + msg, LogLineStyler.styleForLevel("ERROR"));
+                    @Override
+                    protected void process(List<String> chunks) {
+                        for (String l : chunks) {
+                            appendStyledLogLine(l);
+                        }
                     }
-                }
-            };
 
-            renderWorker.execute();
-            return;
+                    @Override
+                    protected void done() {
+                        try {
+                            get();
+                        } catch (CancellationException ignored) {
+                        } catch (Exception ex) {
+                            String msg = ex.getCause() != null ? ex.getCause().getMessage() : ex.getMessage();
+                            appendStyledLine("ERROR renderizando: " + msg, LogLineStyler.styleForLevel("ERROR"));
+                        } finally {
+                            if (pageMatchesRendered == 0 && eofReached) {
+                                // We hit real end for this filter; no more down pages.
+                                hasMoreDown = false;
+                            }
+
+                            if (pageMatchesRendered == 0 && eofReached && paging.startOffset() > 0) {
+                                paging.moveWindowUp();
+                                appendStyledLine("", LogLineStyler.styleForPlainText());
+                                appendStyledLine("[FIN DEL LOG - no hay más coincidencias para los filtros actuales]", LogLineStyler.styleForPlainText());
+                            }
+
+                            renderInProgress = false;
+
+                            // Restore a reasonable scroll anchor AFTER the document updates.
+                            SwingUtilities.invokeLater(() -> {
+                                try {
+                                    if (outputScrollPane != null) {
+                                        var bar = outputScrollPane.getVerticalScrollBar();
+                                        if (pendingScrollDirection == ScrollDirection.UP) {
+                                            // keep near-top to allow repeated up loads
+                                            bar.setValue(10);
+                                        } else if (pendingScrollDirection == ScrollDirection.DOWN) {
+                                            // keep near-bottom
+                                            bar.setValue(Math.max(0, bar.getMaximum() - bar.getModel().getExtent() - 10));
+                                        } else {
+                                            // default: keep previous position when re-rendering due to filters
+                                            bar.setValue(Math.min(oldScrollValue, Math.max(0, bar.getMaximum() - bar.getModel().getExtent())));
+                                        }
+                                    }
+                                } finally {
+                                    pendingScrollDirection = ScrollDirection.NONE;
+                                    ignoreScrollEvents = false;
+                                }
+                            });
+                        }
+                    }
+                };
+
+                renderWorker.execute();
+                return;
+            }
+
+            appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
+            appendStyledLine("Errores detectados (tras ignorados): " + result.summary().getTotalErrors(), LogLineStyler.styleForPlainText());
+            appendStyledLine("", LogLineStyler.styleForPlainText());
+
+            result.summary().getOccurrencesByType().entrySet().stream()
+                    .sorted(Map.Entry.<String, Long>comparingByValue(java.util.Comparator.reverseOrder())
+                            .thenComparing(Map.Entry.comparingByKey()))
+                    .forEach(e -> appendStyledLine(e.getKey() + " -> " + e.getValue(), LogLineStyler.styleForPlainText()));
+        } finally {
+            if (!onlyConsoleMenuItem.isSelected()) {
+                renderInProgress = false;
+                SwingUtilities.invokeLater(() -> ignoreScrollEvents = false);
+            }
         }
-
-        // Summary rendering is lightweight
-        appendStyledLine("Fichero analizado: " + result.analyzedFile(), LogLineStyler.styleForPlainText());
-        appendStyledLine("Errores detectados (tras ignorados): " + result.summary().getTotalErrors(), LogLineStyler.styleForPlainText());
-        appendStyledLine("", LogLineStyler.styleForPlainText());
-
-        result.summary().getOccurrencesByType().entrySet().stream()
-                .sorted(Map.Entry.<String, Long>comparingByValue(java.util.Comparator.reverseOrder())
-                        .thenComparing(Map.Entry.comparingByKey()))
-                .forEach(e -> appendStyledLine(e.getKey() + " -> " + e.getValue(), LogLineStyler.styleForPlainText()));
-
-        stopButton.setEnabled(false);
     }
 
     private void setConsoleType(ConsoleType type) {
         this.selectedConsoleType = type;
         this.consoleLineFilter = new ConsoleLineFilter(type);
         persistPreferences();
+        paging.reset();
         reanalyzeIfPossible();
+        pendingScrollDirection = ScrollDirection.NONE;
+        hasMoreDown = true;
     }
 
     private void onLevelsChanged() {
         selectedLevels = newSelectedLevelsFromMenu();
         logLevelFilter = new LogLevelFilter(selectedLevels);
         persistPreferences();
+        paging.reset();
         reanalyzeIfPossible();
+        pendingScrollDirection = ScrollDirection.NONE;
+        hasMoreDown = true;
     }
 
     private EnumSet<LogLevel> newSelectedLevelsFromMenu() {
