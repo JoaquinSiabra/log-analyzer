@@ -347,9 +347,10 @@ public final class LogAnalyzerFrame extends JFrame {
         sb.append("Fichero analizado: ").append(result.analyzedFile()).append("\n");
         sb.append("Errores detectados (tras ignorados): ").append(result.summary().getTotalErrors()).append("\n\n");
 
-        for (Map.Entry<String, Long> e : result.summary().getOccurrencesByType().entrySet()) {
-            sb.append(e.getKey()).append(" -> ").append(e.getValue()).append("\n");
-        }
+        result.summary().getOccurrencesByType().entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue(java.util.Comparator.reverseOrder())
+                        .thenComparing(Map.Entry.comparingByKey()))
+                .forEach(e -> sb.append(e.getKey()).append(" -> ").append(e.getValue()).append("\n"));
 
         output.setText(sb.toString());
     }
